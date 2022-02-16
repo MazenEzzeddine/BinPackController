@@ -14,11 +14,15 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 
 public class Scaler {
 
+    public  static Instant lastDecision;
     public static  String CONSUMER_GROUP;
     public static int numberOfPartitions;
     public static AdminClient admin = null;
@@ -45,6 +49,8 @@ public class Scaler {
     private static Properties metadataConsumerProps;
     private static KafkaConsumer<byte[], byte[]> metadataConsumer;
 
+    static Map<String, ConsumerGroupDescription> consumerGroupDescriptionMap;
+
     public static void main(String[] args) throws ExecutionException, InterruptedException {
 
         int iteration =0;
@@ -64,6 +70,8 @@ public class Scaler {
         props.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 6000);
         props.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 6000);
         admin = AdminClient.create(props);
+
+        lastDecision= Instant.now().minus(1, ChronoUnit.DAYS);
 
 
         while (true) {
@@ -113,7 +121,7 @@ public class Scaler {
                     describeConsumerGroupsResult.all();
 
 
-            Map<String, ConsumerGroupDescription> consumerGroupDescriptionMap;
+            //Map<String, ConsumerGroupDescription> consumerGroupDescriptionMap;
             consumerGroupDescriptionMap = futureOfDescribeConsumerGroupsResult.get();
             log.info("The consumer group {} is in state {}", Scaler.CONSUMER_GROUP,
                     consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).state().toString());
@@ -132,7 +140,7 @@ public class Scaler {
                     }
                 }
                 consumerToLag.remove(md);
-                //maxConsumptionRatePerConsumer.remove(md);
+                maxConsumptionRatePerConsumer.remove(md);
             }
             //////////////////////////////////
             Long consumerLag = 0L;
@@ -166,18 +174,30 @@ public class Scaler {
     }
 
     private static void binPackAndScale() {
+        if((Duration.between( lastDecision, Instant.now()).toMinutes()<1)) {
+            log.info("time elpased since last decision is {}",
+                    Duration.between(lastDecision, Instant.now()).toSeconds());
+            return;
+            //cooldown period of 1 min
+        }
+
+        log.info("Inside binPackAndScale ");
 
         List<Consumer> consumers = new ArrayList<>();
         List<Partition> partitions = new ArrayList<>();
         int consumerCount=0;
+        long averageConsumptionRate=0;
 
-
+        // take the average consumptiopn rate directly out of the
         for (MemberDescription md : maxConsumptionRatePerConsumer.keySet()){
 
            // log.info("Member {} has consumption rate {}", md, maxConsumptionRatePerConsumer.get(md));
-            consumers.add(new Consumer(md.consumerId(),
-                    (long)(Math.floor((maxConsumptionRatePerConsumer.get(md)* 5.0)))));
             consumerCount++;
+            consumers.add(new Consumer(String.valueOf(consumerCount),
+                    (long)(Math.floor((maxConsumptionRatePerConsumer.get(md)* 5.0)))));
+            //get the first consumer to see wether it fits the lags
+            averageConsumptionRate =  (long)(Math.floor((maxConsumptionRatePerConsumer.get(md)* 5.0)));
+            break;
         }
 
         for (TopicPartition partition : partitionToLag.keySet()) {
@@ -188,18 +208,16 @@ public class Scaler {
 
         Collections.sort(partitions, Collections.reverseOrder());
 
-        log.info("sorted partitions");
+        /*log.info("sorted partitions");
         for(Partition p : partitions){
             log.info("partition {} has the following lag {}", p.getId(), p.getLag() );
-        }
+        }*/
 
         for(Consumer cons: consumers){
             log.info("consumer {} has the following initial capacity {}", cons.getId(), cons.getCapacity());
         }
 
-
-        long averageConsumptionRate = 97L;
-
+        log.info("averageConsumptionRate = {}", averageConsumptionRate);
 
 
 
@@ -226,13 +244,40 @@ public class Scaler {
             }
         }
 
-        log.info("Currently we need this consumers {}", consumers.size() );
+        log.info("Currently we need this consumers {}", consumers.size()!=0?consumers.size():1 );
+        log.info("Calling code to scale");
+        scaleAsPerBinPack(consumers.size());
+        lastDecision = Instant.now();
+
+    }
+
+
+    private static void scaleAsPerBinPack(int neededsize) {
+         //same number of consumers but different different assignment
+        log.info("inside the function scale as per the bin pack");
+        log.info("We currently need the following consumers {}", neededsize);
+
+        int currentsize = consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members().size();
+        log.info("Currently we have this number of consumers {}", currentsize);
+
+        int replicasForscale = neededsize - currentsize;
+
+        if(replicasForscale == 0) {
+            log.info("No need to autoscale");
+        }
+        else if(replicasForscale>0){
+            log.info("We have to upscale by {}", replicasForscale);
+        }
+        else {
+            log.info("We have to downscale by {}", replicasForscale);
+        }
 
 
     }
 
 
-    private static float callForConsumptionRate(String host) {
+
+        private static float callForConsumptionRate(String host) {
         ManagedChannel managedChannel = ManagedChannelBuilder.forAddress(host.substring(1), 5002)
                 .usePlaintext()
                 .build();
