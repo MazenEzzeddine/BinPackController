@@ -45,9 +45,7 @@ public class Scaler {
     static String choice;
     static String BOOTSTRAP_SERVERS;
     static Long allowableLag;
-    private static Properties consumerGroupProps;
-    private static Properties metadataConsumerProps;
-    private static KafkaConsumer<byte[], byte[]> metadataConsumer;
+
 
     static Map<String, ConsumerGroupDescription> consumerGroupDescriptionMap;
 
@@ -67,8 +65,6 @@ public class Scaler {
         BOOTSTRAP_SERVERS = System.getenv("BOOTSTRAP_SERVERS");
         Properties props = new Properties();
         props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
-        props.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 6000);
-        props.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 6000);
         admin = AdminClient.create(props);
 
         lastDecision= Instant.now().minus(1, ChronoUnit.DAYS);
@@ -127,7 +123,8 @@ public class Scaler {
                     consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).state().toString());
 
 
-            // if a particular consumer is removed as a result of scaling decision remove it from the map cache
+            // if a particular consumer is removed as a result of scaling decision
+            // remove it from the map cache where applicable
             Set<MemberDescription> previousConsumers = new HashSet<MemberDescription>(consumerToLag.keySet());
             for (MemberDescription md : previousConsumers) {
                 //log.info("Member Description client id {}, consumer id {}, host {}", md.clientId(), md.consumerId(), md.host());
@@ -142,7 +139,7 @@ public class Scaler {
                 consumerToLag.remove(md);
                 maxConsumptionRatePerConsumer.remove(md);
             }
-            //////////////////////////////////
+            //Compute lag per consumer
             Long consumerLag = 0L;
             for (MemberDescription memberDescription : consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members()) {
                 MemberAssignment memberAssignment = memberDescription.assignment();
@@ -190,8 +187,6 @@ public class Scaler {
 
         // take the average consumptiopn rate directly out of the
         for (MemberDescription md : maxConsumptionRatePerConsumer.keySet()){
-
-           // log.info("Member {} has consumption rate {}", md, maxConsumptionRatePerConsumer.get(md));
             consumerCount++;
             consumers.add(new Consumer(String.valueOf(consumerCount),
                     (long)(Math.floor((maxConsumptionRatePerConsumer.get(md)* 5.0)))));
@@ -199,20 +194,16 @@ public class Scaler {
             averageConsumptionRate =  (long)(Math.floor((maxConsumptionRatePerConsumer.get(md)* 5.0)));
             break;
         }
-
+        //construct the partion objects with their lags
         for (TopicPartition partition : partitionToLag.keySet()) {
-           // log.info("partition {} has the following lag {}", partition.partition(), partitionToLag.get(partition));
             partitions.add(new Partition( partition.partition(), partitionToLag.get(partition)));
-
         }
 
         Collections.sort(partitions, Collections.reverseOrder());
-
         /*log.info("sorted partitions");
         for(Partition p : partitions){
             log.info("partition {} has the following lag {}", p.getId(), p.getLag() );
         }*/
-
         for(Consumer cons: consumers){
             log.info("consumer {} has the following initial capacity {}", cons.getId(), cons.getCapacity());
         }
@@ -237,7 +228,6 @@ public class Scaler {
                     consumer.assignPartition(partition);
                 }
             }
-            // account for a consumers added for the last partition
             if (consumer != null) {
                 consumers.add(consumer);
                 consumer = null;
@@ -261,15 +251,15 @@ public class Scaler {
         log.info("Currently we have this number of consumers {}", currentsize);
 
         int replicasForscale = neededsize - currentsize;
-
+        // but is the assignmenet the same
         if(replicasForscale == 0) {
             log.info("No need to autoscale");
         }
-        else if(replicasForscale>0){
+        else if(replicasForscale > 0){
             log.info("We have to upscale by {}", replicasForscale);
         }
         else {
-            log.info("We have to downscale by {}", replicasForscale);
+            log.info("We have to downscale by {}", Math.abs(replicasForscale));
         }
 
 
