@@ -242,11 +242,20 @@ public class Scaler {
     }
 
 
+    private static boolean doesTheCurrentAssigmentViolateTheSLA(){
+        for (MemberDescription memberDescription : consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members()) {
+            if(consumerToLag.get(memberDescription)> maxConsumptionRatePerConsumer.get(memberDescription))
+                return true;
+        }
+        return false;
+    }
+
+
     private static void scaleAsPerBinPack(int neededsize) {
          //same number of consumers but different different assignment
         log.info("inside the function scale as per the bin pack");
         log.info("We currently need the following consumers {}", neededsize);
-
+        //previous
         int currentsize = consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members().size();
         log.info("Currently we have this number of consumers {}", currentsize);
 
@@ -254,12 +263,43 @@ public class Scaler {
         // but is the assignmenet the same
         if(replicasForscale == 0) {
             log.info("No need to autoscale");
+            log.info("But what if the generated assignmenet is different than existing one under the same number" +
+                    "of consumers");
+
+            log.info("Does the current assignme viloate the SLA lag> R Wmax");
+
+            doesTheCurrentAssigmentViolateTheSLA();
+
+            /*if(!doesTheCurrentAssigmentViolateTheSLA()) {
+                //with the same number of consumers if the current assignment does not violate the SLA
+                return;
+            } else {
+                log.info("We have to enforce rebalance");
+                //TODO skipping it for now. (enforce rebalance)
+            }*/
         }
         else if(replicasForscale > 0){
             log.info("We have to upscale by {}", replicasForscale);
+            log.info("Upscaling");
+
+            try (final KubernetesClient k8s = new DefaultKubernetesClient()) {
+                ServiceAccount fabric8 = new ServiceAccountBuilder().withNewMetadata().withName("fabric8").endMetadata().build();
+                k8s.serviceAccounts().inNamespace("default").createOrReplace(fabric8);
+                k8s.apps().deployments().inNamespace("default").withName("cons1persec").scale(neededsize);
+                log.info("I have upscaled you should have {}", neededsize);
+            }
         }
         else {
             log.info("We have to downscale by {}", Math.abs(replicasForscale));
+
+            try (final KubernetesClient k8s = new DefaultKubernetesClient()) {
+                ServiceAccount fabric8 = new ServiceAccountBuilder().withNewMetadata().withName("fabric8").endMetadata().build();
+                k8s.serviceAccounts().inNamespace("default").createOrReplace(fabric8);
+                k8s.apps().deployments().inNamespace("default").withName("cons1persec").scale(neededsize);
+                log.info("I have downscaled, you should have {}", neededsize);
+            }
+
+
         }
 
 
