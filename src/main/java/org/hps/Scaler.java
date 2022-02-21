@@ -201,15 +201,22 @@ public class Scaler {
 
 
 
-      /*  log.info("sorted partitions");
-        for(Partition p : partitions){
-            log.info("partition {} has the following lag {}", p.getId(), p.getLag() );
-        }
-        for(Consumer cons: consumers){
-            log.info("consumer {} has the following initial capacity {}", cons.getId(), cons.getCapacity());
-        }
 
-        log.info("averageConsumptionRate = {}", averageConsumptionRate);*/
+        //if a certain partition has a lag higher than R Wmax set its lag to R*Wmax
+
+
+
+        log.info("current set of consumers {}", consumers.size());
+
+        for (Partition partition : partitions) {
+           log.info("partition {} has the following lag {}", partition.getId(), partition.getLag());
+           if(partition.getLag()> consumers.get(0).getCapacity()) {
+               log.info("Since partition {} has lag {} higher than consumer capacity {}" +
+                       " we are truncating its lag", partition.getId(), partition.getLag(), consumers.get(0).getCapacity());
+                partition.setLag(consumers.get(0).getCapacity());
+
+           }
+        }
 
 
         Consumer consumer = null;
@@ -233,8 +240,12 @@ public class Scaler {
                 consumer = null;
             }
         }
-
         int scaleBy = consumers.size() != 0 ? consumers.size() : 1;
+
+        if(consumers.size() > numberOfPartitions) {
+            scaleBy = numberOfPartitions;
+        }
+
 
         log.info("Currently we need this consumers {}", scaleBy);
         log.info("Calling code to scale");
