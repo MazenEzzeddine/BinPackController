@@ -249,7 +249,7 @@ public class Scaler {
 
         log.info("Currently we need this consumers {}", scaleBy);
         log.info("Calling code to scale");
-        scaleAsPerBinPack(scaleBy);
+        scaleAsPerBinPack(scaleBy, averageConsumptionRate);
         lastDecision = Instant.now();
 
     }
@@ -264,11 +264,15 @@ public class Scaler {
     }
 
 
-    private static void scaleAsPerBinPack(int neededsize) {
+    private static void scaleAsPerBinPack(int neededsize, long averageConsumptionRate)  {
         //same number of consumers but different different assignment
         log.info("We currently need the following consumers {}", neededsize);
         int currentsize = consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members().size();
         log.info("Currently we have this number of consumers {}", currentsize);
+
+        double arrivalRate = totalArrivalRate(consumerGroupDescriptionMap);
+
+        log.info("Total Arrival rate into the topic {}", arrivalRate);
 
         int replicasForscale = neededsize - currentsize;
         // but is the assignmenet the same
@@ -297,13 +301,23 @@ public class Scaler {
                 log.info("I have upscaled you should have {}", neededsize);
             }
         } else {
-            log.info("We have to downscale by {}", Math.abs(replicasForscale));
+            //log.info("We have to downscale by {}", Math.abs(replicasForscale));
+
+            double ratescale = Math.ceil(arrivalRate/((double)averageConsumptionRate/5.0));
+            log.info("rate scale {}", ratescale);
+
+            //double max = Math.max((double)Math.abs(replicasForscale),ratescale );
+
+            double max = Math.max(neededsize,ratescale );
+
+
+            log.info("we have to don scale by effectively {}", max);
 
             try (final KubernetesClient k8s = new DefaultKubernetesClient()) {
                 ServiceAccount fabric8 = new ServiceAccountBuilder().withNewMetadata().withName("fabric8").endMetadata().build();
                 k8s.serviceAccounts().inNamespace("default").createOrReplace(fabric8);
-                k8s.apps().deployments().inNamespace("default").withName("cons1persec").scale(neededsize);
-                log.info("I have downscaled, you should have {}", neededsize);
+                k8s.apps().deployments().inNamespace("default").withName("cons1persec").scale((int) max);
+                log.info("I have downscaled, you should have {}", max);
             }
 
         }
@@ -325,6 +339,44 @@ public class Scaler {
         managedChannel.shutdown();
         return rateResponse.getRate();
     }
+
+
+    static double totalArrivalRate(Map<String, ConsumerGroupDescription> consumerGroupDescriptionMap) {
+        float totalConsumptionRate = 0;
+        float totalArrivalRate = 0;
+        long totallag = 0;
+        int size = consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members().size();
+        log.info("Currently we have this number of consumers {}", size);
+        for (MemberDescription memberDescription : consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members()) {
+            long totalpoff = 0;
+            long totalcoff = 0;
+            long totalepoff = 0;
+            long totalecoff = 0;
+            for (TopicPartition tp : memberDescription.assignment().topicPartitions()) {
+                totalpoff += previousPartitionToCommittedOffset.get(tp);
+                totalcoff += currentPartitionToCommittedOffset.get(tp);
+                totalepoff += previousPartitionToLastOffset.get(tp);
+                totalecoff += currentPartitionToLastOffset.get(tp);
+            }
+
+            float consumptionRatePerConsumer;
+            float arrivalRatePerConsumer;
+
+            consumptionRatePerConsumer = (float) (totalcoff - totalpoff) / sleep;
+            arrivalRatePerConsumer = (float) (totalecoff - totalepoff) / sleep;
+
+
+            totalConsumptionRate += consumptionRatePerConsumer;
+            totalArrivalRate += arrivalRatePerConsumer;
+            totallag += consumerToLag.get(memberDescription);
+        }
+        log.info("totalArrivalRate {}, totalconsumptionRate {}, totallag {}",
+                totalArrivalRate * 1000, totalConsumptionRate * 1000, totallag);
+
+        return totalArrivalRate * 1000.0;
+
+    }
+
 
 
 }
