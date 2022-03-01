@@ -316,7 +316,8 @@ public class Scaler {
         float totalConsumptionRate = 0;
         float totalArrivalRate = 0;
         long totallag = 0;
-
+        int size = consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members().size();
+        log.info("Currently we have this number of consumers {}", size);
         for (MemberDescription memberDescription : consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members()) {
             long totalpoff = 0;
             long totalcoff = 0;
