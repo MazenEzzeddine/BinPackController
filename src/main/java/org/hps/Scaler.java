@@ -22,7 +22,11 @@ import java.util.concurrent.ExecutionException;
 public class Scaler {
 
     private static final Logger log = LogManager.getLogger(Scaler.class);
-    public static Instant lastDecision;
+    public static Instant lastDecisionInterval;
+    public static Instant lastScaleUpDecision;
+    public static Instant lastScaleDownDecision;
+
+
     public static String CONSUMER_GROUP;
     public static int numberOfPartitions;
     public static AdminClient admin = null;
@@ -63,7 +67,9 @@ public class Scaler {
         Properties props = new Properties();
         props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
         admin = AdminClient.create(props);
-        lastDecision = Instant.now().minus(1, ChronoUnit.DAYS);
+        lastDecisionInterval = Instant.now().minus(1, ChronoUnit.DAYS);
+        lastScaleUpDecision= Instant.now();
+        lastScaleDownDecision = Instant.now();
 
 
         while (true) {
@@ -75,6 +81,7 @@ public class Scaler {
                     admin.listConsumerGroupOffsets(CONSUMER_GROUP)
                             .partitionsToOffsetAndMetadata().get();
             numberOfPartitions = offsets.size();
+            log.info("Number of partitions is {}", numberOfPartitions);
             Map<TopicPartition, OffsetSpec> requestLatestOffsets = new HashMap<>();
             //initialize consumer to lag to 0
             for (TopicPartition tp : offsets.keySet()) {
@@ -119,25 +126,14 @@ public class Scaler {
                     consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).state().toString());
 
 
-            // if a particular consumer is removed as a result of scaling decision
-            // remove it from the map cache where applicable
-            Set<MemberDescription> previousConsumers = new HashSet<MemberDescription>(consumerToLag.keySet());
-            for (MemberDescription md : previousConsumers) {
-                //log.info("Member Description client id {}, consumer id {}, host {}", md.clientId(), md.consumerId(), md.host());
-                if (consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members().contains(md)) {
-                    if (!firstIteration) {
-                        log.info("Calling the consumer {} for its consumption rate ", md.host());
-                        float rate = callForConsumptionRate(md.host());
-                        maxConsumptionRatePerConsumer.put(md, rate);
-                        continue;
-                    }
-                }
-                consumerToLag.remove(md);
-                maxConsumptionRatePerConsumer.remove(md);
-            }
-            //Compute lag per consumer
             Long consumerLag = 0L;
             for (MemberDescription memberDescription : consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members()) {
+
+                if (!firstIteration) {
+                    log.info("Calling the consumer {} for its consumption rate ", memberDescription.host());
+                    float rate = callForConsumptionRate(memberDescription.host());
+                    maxConsumptionRatePerConsumer.put(memberDescription, rate);
+                }
                 MemberAssignment memberAssignment = memberDescription.assignment();
                 for (TopicPartition tp : memberAssignment.topicPartitions()) {
                     consumerLag += partitionToLag.get(tp);
@@ -147,32 +143,20 @@ public class Scaler {
             }
             if (!firstIteration) {
                 binPackAndScale();
-                if (mode.equalsIgnoreCase("proactive")) {
-                    //proactive(consumerGroupDescriptionMap);
-                } else if (mode.equalsIgnoreCase("reactive")) {
-                    //reactiveLag(consumerGroupDescriptionMap);
-                } else if (mode.equalsIgnoreCase("eagerlazy")) {
-                    //eagerlazy(consumerGroupDescriptionMap);
-                }
 
             } else {
                 //metadataConsumer = prepareConsumer();
                 firstIteration = false;
             }
 
-            log.info("sleeping for  {} secs", sleep);
+            log.info("sleeping for  {} secs", sleep/1000.0);
             Thread.sleep(sleep);
             iteration++;
         }
     }
 
     private static void binPackAndScale() {
-        if ((Duration.between(lastDecision, Instant.now()).toMinutes() < 1)) {
-            log.info("time elpased since last decision is {}",
-                    Duration.between(lastDecision, Instant.now()).toSeconds());
-            return;
-            //cooldown period of 1 min
-        }
+
         log.info("Inside binPackAndScale ");
         List<Consumer> consumers = new ArrayList<>();
         List<Partition> partitions = new ArrayList<>();
@@ -185,9 +169,11 @@ public class Scaler {
             consumers.add(new Consumer(String.valueOf(consumerCount),
                     (long) (Math.floor((maxConsumptionRatePerConsumer.get(md) * 5.0)))));
             //get the first consumer to see wether it fits the lags
+
             averageConsumptionRate = (long) (Math.floor((maxConsumptionRatePerConsumer.get(md) * 5.0)));
             break;
         }
+
         //construct the partion objects with their lags
         for (TopicPartition partition : partitionToLag.keySet()) {
             partitions.add(new Partition(partition.partition(), partitionToLag.get(partition)));
@@ -234,9 +220,9 @@ public class Scaler {
         }
 
         log.info("Currently we need this consumers {}", scaleBy);
-        log.info("Calling code to scale");
+        //log.info("Calling code to scale");
         scaleAsPerBinPack(scaleBy, averageConsumptionRate);
-        lastDecision = Instant.now();
+       /* lastDecisionInterval = Instant.now();*/
     }
 
 
@@ -249,9 +235,9 @@ public class Scaler {
     }
 
 
-    private static void scaleAsPerBinPack(int neededsize, long averageConsumptionRate)  {
+    private static void scaleAsPerBinPack(int neededsize, long averageConsumptionRate) {
         //same number of consumers but different different assignment
-        log.info("We currently need the following consumers {}", neededsize);
+        log.info("We currently need the following consumers (as per the bin pack) {}", neededsize);
         int currentsize = consumerGroupDescriptionMap.get(Scaler.CONSUMER_GROUP).members().size();
         log.info("Currently we have this number of consumers {}", currentsize);
         double arrivalRate = totalArrivalRate(consumerGroupDescriptionMap);
@@ -260,9 +246,6 @@ public class Scaler {
         // but is the assignmenet the same
         if (replicasForscale == 0) {
             log.info("No need to autoscale");
-            log.info("But what if the generated assignmenet is different than existing one under the same number" +
-                    "of consumers");
-            log.info("Does the current assignme viloate the SLA lag> R Wmax");
             /*if(!doesTheCurrentAssigmentViolateTheSLA()) {
                 //with the same number of consumers if the current assignment does not violate the SLA
                 return;
@@ -271,26 +254,44 @@ public class Scaler {
                 //TODO skipping it for now. (enforce rebalance)
             }*/
         } else if (replicasForscale > 0) {
-            log.info("We have to upscale by {}", replicasForscale);
-            log.info("Upscaling");
-            try (final KubernetesClient k8s = new DefaultKubernetesClient()) {
-                ServiceAccount fabric8 = new ServiceAccountBuilder().withNewMetadata().withName("fabric8").endMetadata().build();
-                k8s.serviceAccounts().inNamespace("default").createOrReplace(fabric8);
-                k8s.apps().deployments().inNamespace("default").withName("cons1persec").scale(neededsize);
-                log.info("I have upscaled you should have {}", neededsize);
+            //checking for scale up coooldown
+            if (Duration.between(lastScaleUpDecision, Instant.now()).toSeconds() < 30) {
+                log.info("Scale up cooldown period has not elapsed yet not taking decisions");
+                return;
+            } else {
+                log.info("We have to upscale by {}", replicasForscale);
+                log.info("Upscaling");
+                try (final KubernetesClient k8s = new DefaultKubernetesClient()) {
+                    ServiceAccount fabric8 = new ServiceAccountBuilder().withNewMetadata().withName("fabric8").endMetadata().build();
+                    k8s.serviceAccounts().inNamespace("default").createOrReplace(fabric8);
+                    k8s.apps().deployments().inNamespace("default").withName("cons1persec").scale(neededsize);
+                    log.info("I have upscaled you should have {}", neededsize);
+                }
             }
+            lastScaleUpDecision = Instant.now();
         } else {
-            //log.info("We have to downscale by {}", Math.abs(replicasForscale));
-            double ratescale = Math.ceil(arrivalRate/((double)averageConsumptionRate/5.0));
-            log.info("rate scale {}", ratescale);
-            //double max = Math.max((double)Math.abs(replicasForscale),ratescale );
-            double max = Math.max(neededsize,ratescale );
-            log.info("we have to don scale by effectively {}", max);
-            try (final KubernetesClient k8s = new DefaultKubernetesClient()) {
-                ServiceAccount fabric8 = new ServiceAccountBuilder().withNewMetadata().withName("fabric8").endMetadata().build();
-                k8s.serviceAccounts().inNamespace("default").createOrReplace(fabric8);
-                k8s.apps().deployments().inNamespace("default").withName("cons1persec").scale((int) max);
-                log.info("I have downscaled, you should have {}", max);
+
+            if (Duration.between(lastScaleDownDecision, Instant.now()).toSeconds() < 60) {
+                log.info("Scale down cooldown period has not elapsed yet not taking scale down decisions");
+                return;
+            } else {
+                double ratescale = Math.ceil(arrivalRate / ((double) averageConsumptionRate / 5.0));
+                log.info("As per the arrival rate we need {}", ratescale);
+                double max = Math.max(neededsize, ratescale);
+                log.info("The maximum suggestion between bin pack and arrival rate scale down is {}", max);
+                if (max < currentsize) {
+                    //not to do a scale up
+                    try (final KubernetesClient k8s = new DefaultKubernetesClient()) {
+                        ServiceAccount fabric8 = new ServiceAccountBuilder().withNewMetadata().withName("fabric8").endMetadata().build();
+                        k8s.serviceAccounts().inNamespace("default").createOrReplace(fabric8);
+                        k8s.apps().deployments().inNamespace("default").withName("cons1persec").scale((int) max);
+                        log.info("I have downscaled, you should have {}", max);
+                    }
+                    lastScaleDownDecision = Instant.now();
+                } else {
+
+                    log.info("Hence, I have not downscaled, current consumers {}", currentsize);
+                }
             }
         }
     }
